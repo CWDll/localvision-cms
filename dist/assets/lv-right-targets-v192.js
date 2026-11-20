@@ -428,7 +428,9 @@
       var key = String(content.id || content.r2Key || content.title || 'right');
       var target = getContentTarget(content);
       var stamp = key + '|' + target.mode + '|' + target.stores.join(',') + '|' + state.stores.length;
-      if (existing && !force && existing.getAttribute('data-lv-visibility-stamp') === stamp) return;
+      // 내용이 같으면 force여도 다시 그리지 않습니다. 다시 그리면 화면 변경 감지 → tick → 다시 그리기로
+      // 끝없이 반복됩니다(v1.9.5는 8초에 약 2,500번 다시 그림).
+      if (existing && existing.getAttribute('data-lv-visibility-stamp') === stamp) return;
       if (existing) existing.remove();
       var controls = makeVisibilityControls(content);
       controls.setAttribute('data-lv-visibility-stamp', stamp);
