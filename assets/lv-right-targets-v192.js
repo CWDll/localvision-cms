@@ -1,7 +1,7 @@
 (function () {
   'use strict';
 
-  var VERSION = 'v1.9.5-device-control-black-mode-ui-version-fix';
+  var VERSION = 'v1.9.6-exact-card-match';
   var state = {
     stores: [],
     contents: [],
@@ -324,54 +324,60 @@
     return '전체 매장 ' + state.stores.length + '곳';
   }
 
-  function countKnownRightTitles(txt, current) {
-    var count = 0;
-    var seen = {};
-    state.contents.forEach(function (c) {
-      var t = String(c.title || c.fileName || c.file_name || '').trim();
-      if (!t || seen[t]) return;
-      if (txt.indexOf(t) >= 0) { seen[t] = true; count += 1; }
-    });
-    return count;
+  // v1.9.6: 카드와 콘텐츠를 카드의 '미디어 열기' 링크(콘텐츠마다 고유한 R2 파일 주소)로 정확히 연결합니다.
+  // 예전에는 제목 글자가 포함되는지로 찾아서, right_11 파일명 안에 'right_1'이 들어 있다는 이유로
+  // right_1 카드에 right_11의 송출 범위(전체 매장)가 붙는 오표시가 있었습니다.
+  // 주소가 정확히 일치하는 콘텐츠가 없으면 추측하지 않고 표시하지 않습니다.
+  function mediaPath(value) {
+    var raw = String(value || '').trim();
+    if (!raw) return '';
+    try {
+      var parsed = new URL(raw, window.location.href);
+      raw = parsed.searchParams.get('key') || parsed.pathname;
+    } catch (_) {
+      raw = raw.split('?')[0];
+    }
+    try { raw = decodeURIComponent(raw); } catch (_) {}
+    return raw.replace(/^\/+/, '');
   }
 
-  function findCandidateCardForContent(content) {
-    if (!isStrictContentManagementPage()) return null;
-    var title = String(content.title || '').trim();
-    var fileName = String(content.fileName || content.file_name || '').trim();
-    var r2Key = String(content.r2Key || content.r2_key || '').trim();
-    if (!title && !fileName && !r2Key) return null;
-    var all = Array.from(document.querySelectorAll('article, section, .content-card, .content-row, .panel, .card, div'));
-    var matches = [];
-    for (var i = 0; i < all.length; i++) {
-      var el = all[i];
-      if (!el || !el.querySelector || el.id === 'root' || isInsideNavigation(el) || el.closest('#lv-right-target-panel') || el.closest('#lv-right-visibility-modal')) continue;
-      var txt = textOf(el);
-      if (!txt || txt.length > 1400) continue;
-      // 업로드 폼 안에는 방금 입력한 파일명/right_9 같은 텍스트가 있어서
-      // 콘텐츠 카드로 오인될 수 있습니다. 송출 매장 보기 버튼은 실제 콘텐츠 카드에만 붙입니다.
-      if (txt.indexOf('새 콘텐츠 추가') >= 0 || txt.indexOf('파일 업로드 + 콘텐츠 저장') >= 0 || txt.indexOf('파일명 직접 입력') >= 0 || txt.indexOf('콘텐츠 제목') >= 0) continue;
-      if (el.querySelector && (el.querySelector('input[type="file"]') || el.querySelector('select'))) continue;
-      var titleHit = title && txt.indexOf(title) >= 0;
-      var fileHit = fileName && txt.indexOf(fileName) >= 0;
-      var keyHit = r2Key && txt.indexOf(r2Key) >= 0;
-      var rightHint = txt.indexOf('stores/_common/right') >= 0 || txt.indexOf('공통 우측') >= 0 || txt.indexOf('우측 30') >= 0 || txt.indexOf('미디어 열기') >= 0 || txt.indexOf('저장 위치: stores/_common/right') >= 0;
-      if (!((titleHit || fileHit || keyHit) && (rightHint || fileHit || keyHit))) continue;
-      // 여러 콘텐츠를 한꺼번에 감싸는 부모 컨테이너에 버튼이 붙으면 right_12가 all처럼 보이는 등 오표시가 생깁니다.
-      // 따라서 현재 콘텐츠 외의 right_* 제목이 같이 들어 있는 큰 부모는 제외합니다.
-      if (countKnownRightTitles(txt, content) > 1) continue;
-      try {
-        var rect = el.getBoundingClientRect();
-        if ((rect.width && rect.width < 150) || (rect.height && rect.height < 45)) continue;
-      } catch (_) {}
-      matches.push(el);
+  function contentMediaPaths(content) {
+    var paths = [];
+    var fromUrl = mediaPath(content.url);
+    if (fromUrl) paths.push(fromUrl);
+    var r2Key = String(content.r2Key || content.r2_key || '').trim().replace(/^\/+/, '');
+    if (r2Key) paths.push(r2Key);
+    return paths;
+  }
+
+  function contentForMediaHref(href) {
+    var path = mediaPath(href);
+    if (!path) return null;
+    return state.contents.find(function (content) {
+      return contentMediaPaths(content).some(function (key) {
+        return path === key || path.slice(-(key.length + 1)) === '/' + key;
+      });
+    }) || null;
+  }
+
+  function isMediaLink(node) {
+    return Boolean(node && node.tagName === 'A' && node.getAttribute('href') && textOf(node).indexOf('미디어') >= 0 &&
+      !isInsideNavigation(node) && !node.closest('#lv-right-target-panel') && !node.closest('#lv-right-visibility-modal'));
+  }
+
+  function mediaLinksIn(el) {
+    return Array.from(el.querySelectorAll('a[href]')).filter(isMediaLink);
+  }
+
+  // 미디어 링크에서 위로 올라가며, 미디어 링크를 하나만 가진 가장 큰 블록을 그 콘텐츠의 카드로 봅니다.
+  function cardForMediaLink(link) {
+    var card = link.parentElement;
+    while (card && card.parentElement && card.parentElement !== document.body && card.parentElement.id !== 'root' &&
+      !isInsideNavigation(card.parentElement) && !isUploadLikeBlock(card.parentElement) &&
+      mediaLinksIn(card.parentElement).length === 1) {
+      card = card.parentElement;
     }
-    matches.sort(function (a, b) {
-      var al = textOf(a).length, bl = textOf(b).length;
-      if (al !== bl) return al - bl;
-      return (b.querySelectorAll ? b.querySelectorAll('*').length : 0) - (a.querySelectorAll ? a.querySelectorAll('*').length : 0);
-    });
-    return matches[0] || null;
+    return card;
   }
 
   function makeVisibilityControls(content) {
@@ -407,17 +413,26 @@
 
   function decorateRightContentCards(force) {
     if (!state.contentsLoaded || !isContentPageLike()) return;
+    cleanupVisibilityControlsInUploadForm();
     var decorated = 0;
-    state.contents.forEach(function (content) {
-      var card = findCandidateCardForContent(content);
-      if (!card) return;
-      var key = String(content.id || content.title || content.fileName || 'right');
+    Array.from(document.querySelectorAll('a[href]')).filter(isMediaLink).forEach(function (link) {
+      var card = cardForMediaLink(link);
+      if (!card || isUploadLikeBlock(card)) return;
       var existing = card.querySelector('[data-lv-visibility-for]');
-      if (existing && !force) return;
+      var content = contentForMediaHref(link.getAttribute('href'));
+      if (!content) {
+        // 좌측 콘텐츠이거나 목록에 없는 파일: 다른 콘텐츠 정보를 붙이지 않습니다.
+        if (existing) existing.remove();
+        return;
+      }
+      var key = String(content.id || content.r2Key || content.title || 'right');
+      var target = getContentTarget(content);
+      var stamp = key + '|' + target.mode + '|' + target.stores.join(',') + '|' + state.stores.length;
+      if (existing && !force && existing.getAttribute('data-lv-visibility-stamp') === stamp) return;
       if (existing) existing.remove();
       var controls = makeVisibilityControls(content);
-      var mediaLink = Array.from(card.querySelectorAll('a,button')).find(function (node) { return textOf(node).indexOf('미디어') >= 0; });
-      if (mediaLink && mediaLink.parentElement) mediaLink.parentElement.insertBefore(controls, mediaLink.nextSibling);
+      controls.setAttribute('data-lv-visibility-stamp', stamp);
+      if (link.parentElement) link.parentElement.insertBefore(controls, link.nextSibling);
       else card.appendChild(controls);
       card.dataset.lvRightVisibilityDecorated = key;
       decorated += 1;
@@ -441,70 +456,11 @@
     });
   }
 
-  function uniqueRightNames(txt) {
-    var seen = {};
-    var re = /right[\s_-]*\d+/ig;
-    var m;
-    while ((m = re.exec(txt))) {
-      var key = m[0].toLowerCase().replace(/[\s-]+/g, '_');
-      seen[key] = true;
-    }
-    return Object.keys(seen);
-  }
-
-  function inferRightContentFromCard(card) {
-    var txt = textOf(card);
-    var names = uniqueRightNames(txt);
-    if (!names.length) return null;
-    var title = names[0];
-    var known = state.contents.find(function (content) {
-      var t = String(content.title || '').toLowerCase();
-      var f = String(content.fileName || content.file_name || '').toLowerCase();
-      return t === title || f.indexOf(title) >= 0 || txt.indexOf(content.fileName || content.file_name || '') >= 0;
-    });
-    if (known) return known;
-    return {
-      id: 'visible_' + title,
-      title: title,
-      fileName: '',
-      r2Key: 'stores/_common/right',
-      targetMode: 'all',
-      targetStores: []
-    };
-  }
-
+  // v1.9.6: 제목 글자로 추측하던 보조 표시는 오표시(right_1 → right_11)의 원인이라 사용하지 않습니다.
+  // 모든 카드는 decorateRightContentCards가 미디어 주소로 정확히 연결합니다.
   function decorateVisibleRightCardsFallback(force) {
     if (!isContentPageLike()) return;
     cleanupVisibilityControlsInUploadForm();
-    var nodes = Array.from(document.querySelectorAll('main article, main section, main .content-card, main .content-row, main .card, main div'));
-    var decorated = 0;
-    nodes.forEach(function (el) {
-      if (!el || !el.querySelector || el.id === 'root' || isInsideNavigation(el) || el.closest('#lv-right-target-panel') || el.closest('#lv-right-visibility-modal')) return;
-      if (isUploadLikeBlock(el)) return;
-      if (el.querySelector('[data-lv-visibility-for]') && !force) return;
-      var txt = textOf(el);
-      if (!txt || txt.length < 30 || txt.length > 900) return;
-      if (txt.indexOf('stores/_common/right') < 0 && txt.indexOf('공통 우측') < 0 && txt.indexOf('우측 30') < 0) return;
-      if (txt.indexOf('미디어 열기') < 0 && txt.indexOf('저장 위치') < 0) return;
-      var names = uniqueRightNames(txt);
-      if (names.length !== 1) return;
-      // 부모/큰 컨테이너가 아니라 가장 작은 콘텐츠 카드에만 붙입니다.
-      var childWithSame = Array.from(el.children || []).some(function (child) {
-        var childTxt = textOf(child);
-        return childTxt && childTxt !== txt && childTxt.indexOf(names[0]) >= 0 && (childTxt.indexOf('미디어 열기') >= 0 || childTxt.indexOf('저장 위치') >= 0);
-      });
-      if (childWithSame) return;
-      var content = inferRightContentFromCard(el);
-      if (!content) return;
-      var existing = el.querySelector('[data-lv-visibility-for]');
-      if (existing) existing.remove();
-      var controls = makeVisibilityControls(content);
-      var mediaLink = Array.from(el.querySelectorAll('a,button')).find(function (node) { return textOf(node).indexOf('미디어') >= 0; });
-      if (mediaLink && mediaLink.parentElement) mediaLink.parentElement.insertBefore(controls, mediaLink.nextSibling);
-      else el.appendChild(controls);
-      decorated += 1;
-    });
-    if (decorated) log('visibility buttons fallback decorated', decorated);
   }
 
   function findContentForVisibilityButton(btn) {
@@ -513,12 +469,12 @@
     var title = String(btn.getAttribute('data-lv-visibility-title') || '').trim();
     var fileName = String(btn.getAttribute('data-lv-visibility-file') || '').trim();
     var r2Key = String(btn.getAttribute('data-lv-visibility-r2') || '').trim();
-    var found = state.contents.find(function (content) {
-      return (id && String(content.id || '') === id) ||
-        (title && String(content.title || '') === title) ||
-        (fileName && String(content.fileName || content.file_name || '') === fileName) ||
-        (r2Key && String(content.r2Key || content.r2_key || '') === r2Key);
-    });
+    // 고유값 우선: ID → 파일명 → R2 위치 → (마지막으로) 제목이 정확히 같은 것.
+    function firstWhere(test) { return state.contents.find(test) || null; }
+    var found = (id && firstWhere(function (c) { return String(c.id || '') === id; })) ||
+      (fileName && firstWhere(function (c) { return String(c.fileName || c.file_name || '') === fileName; })) ||
+      (r2Key && firstWhere(function (c) { return String(c.r2Key || c.r2_key || '') === r2Key; })) ||
+      (!id && title && firstWhere(function (c) { return String(c.title || '') === title; }));
     if (found) return found;
     return {
       id: id,
